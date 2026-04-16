@@ -1,296 +1,185 @@
 # dj-sort
 
-CLI tool that scans a folder with audio files and distributes them into
-DJ-friendly subfolders. Detects BPM directly from audio when metadata is missing,
-enriches genre data via Discogs API as a last resort.
-Designed for USB flash drives. Distributed as standalone binaries via GitHub Releases.
+CLI tool: scans audio folder → categorizes into DJ-friendly subfolders by BPM,
+genre tags, filename keywords, Discogs API. Output lives on USB flash drive.
+Distributed as standalone binaries via GitHub Releases (no Node.js required).
 
-## Project structure
+## Reading rules
 
-    dj-sort/
-    ├── src/
-    │   ├── index.ts          ← CLI entry point (commander)
-    │   ├── scanner.ts        ← recursive file discovery
-    │   ├── classifier.ts     ← orchestrates all enrichment sources → category
-    │   ├── metadata.ts       ← reads local ID3/FLAC/etc tags via music-metadata
-    │   ├── bpm.ts            ← audio BPM detection via web-audio-beat-detector
-    │   ├── discogs.ts        ← Discogs API lookup by artist+title, returns styles[]
-    │   ├── mover.ts          ← move / copy / dry-run logic
-    │   ├── logger.ts         ← console output + .log file writer
-    │   ├── cache.ts          ← persistent JSON cache for BPM results + Discogs responses
-    │   └── categories.ts     ← folder names, BPM ranges, style maps (single source of truth)
-    ├── .github/
-    │   └── workflows/
-    │       └── release.yml   ← builds and uploads binaries on git tag push
-    ├── CLAUDE.md
-    ├── package.json
-    ├── tsconfig.json
-    └── README.md
+- Read only the file(s) relevant to the current task
+- For any classification/category question: read categories.ts ONLY
+- For API/token questions: read discogs.ts ONLY
+- For build/bundle questions: read package.json ONLY
+- Never read all src/ files at once
+- Use /code-search before reading a full file to locate the relevant section
+- Load CLAUDE.md once at session start — do not re-read it
 
-## Target folder structure produced on the flash drive
+## Agents
 
-    MUSIC/
-    ├── 00_INBOX/           ← unresolvable: no BPM detected, no genre, no Discogs match
-    ├── 01_WARMUP/          ← 60–100 BPM, ambient, downtempo, chill
-    ├── 02_GROOVES/         ← 100–122 BPM, funk, disco, nu-disco
-    ├── 03_HOUSE/           ← 122–128 BPM, deep/tech/progressive house
-    ├── 04_TECHNO/          ← 128–150 BPM, techno, industrial, hard techno
-    ├── 05_BREAKS_DnB/      ← 150–180 BPM, breakbeat, jungle, DnB
-    ├── 06_EXPERIMENTAL/    ← IDM, noise, abstract, odd time
-    ├── 07_TOOLS/           ← loops, acapellas, stems, FX (filename keywords)
-    └── 08_SETS/            ← mixes/podcasts: duration > 1800s or filename keyword
+    typescript-expert     → all src/ implementation
+    code-review-expert    → after each module is complete
+    research-expert       → before adding any npm package
+    security-auditor      → discogs.ts + cache.ts + .env parsing (token safety)
+    documentation-expert  → README.md after implementation
 
-## Tech stack
+## Commands
 
-- Runtime: Node.js 20 + TypeScript
-- CLI framework: commander
-- Audio metadata: music-metadata
-- BPM detection: web-audio-beat-detector
-- Audio decoding for BPM: audio-decode (decodes mp3/flac/wav/etc → PCM float32)
-- HTTP client: got (CJS-compatible, works with pkg)
-- Binary bundler: pkg (targets node20-win-x64, node20-macos-arm64, node20-linux-x64)
-- Package manager: npm
+    /spec:create          before implementing each module
+    /spec:execute         implement from spec
+    /code-review          after each module
+    /validate-and-fix     after full build
+    /checkpoint:create    after each working module + before risky refactors
+    /research             before any new dependency or audio-decode strategy
 
-## Enrichment pipeline — classifier.ts orchestration
+## Build order
 
-For each audio file, classifier.ts runs these steps in order and stops as soon
-as a confident category is found:
+    categories.ts → logger.ts → scanner.ts → metadata.ts →
+    bpm.ts → cache.ts → discogs.ts → classifier.ts → mover.ts → index.ts
 
-    Step 1 — filename keyword check (no I/O)
-        → TOOLS if match: loop, acap, acapella, intro, outro, fx, stem, vox
-        → SETS  if match: mix, set, podcast, episode
+    /checkpoint:create after each. /code-review after bpm.ts, classifier.ts, index.ts.
 
-    Step 2 — local metadata (metadata.ts)
-        Read: BPM tag, genre tag, duration
-        → SETS if duration > 1800s
-        → category by genre keyword match (see keyword map in categories.ts)
-        → store BPM tag value if present, continue to Step 3 for genre enrichment
-        → if genre tag missing: continue to Step 3
+## Structure
 
-    Step 3 — BPM detection (bpm.ts)
-        Trigger condition: no BPM tag found in Step 2
-        Decode audio → Float32Array (mono, 44100 Hz) via audio-decode
-        Run web-audio-beat-detector → bpm: number
-        Cache result to .dj-sort-cache.json keyed by filepath+mtime
-        If genre was already resolved in Step 2: use detected BPM only to confirm range
-        If no genre: classify by BPM range (categories.ts)
-        → category if BPM in known range
-        → continue to Step 4 if BPM detection failed (silence, noise, corrupt file)
+    src/
+      index.ts        CLI entry (commander)
+      scanner.ts      file discovery
+      classifier.ts   orchestrates steps 1–5 → category
+      metadata.ts     ID3/FLAC tags via music-metadata
+      bpm.ts          BPM detection via web-audio-beat-detector + audio-decode
+      discogs.ts      Discogs API → styles[]
+      mover.ts        move / copy / dry-run
+      logger.ts       console + .log file
+      cache.ts        JSON cache: BPM by filepath+mtime, Discogs by artist|title
+      categories.ts   ← SINGLE SOURCE OF TRUTH for all folder names, BPM ranges,
+                         genre keywords, Discogs style map
 
-    Step 4 — Discogs API fallback (discogs.ts)
-        Trigger condition: genre tag missing AND (BPM detection failed OR BPM found
-        but genre context would improve accuracy)
-        Parse artist + title from ID3 tags, fallback to "Artist - Title" filename pattern
-        Query: GET /database/search?artist=...&track=...&type=release&per_page=1
-        Extract styles[] and genres[] from results[0]
-        Map via styleMap in categories.ts
-        Cache result to .dj-sort-cache.json keyed by "artist|title"
-        → category if style matched
-        → INBOX if no match or API error or no token
+## Output folders
 
-    Step 5 — final fallback
-        → INBOX
+    00_INBOX        no BPM, no genre, no Discogs match
+    01_WARMUP       60–100 BPM  | ambient, downtempo, chill
+    02_GROOVES      100–122 BPM | funk, disco, nu-disco
+    03_HOUSE        122–128 BPM | house, deep house, tech house
+    04_TECHNO       128–150 BPM | techno, industrial, hard techno
+    05_BREAKS_DnB   150–180 BPM | breakbeat, jungle, dnb
+    06_EXPERIMENTAL any BPM     | IDM, noise, abstract
+    07_TOOLS        filename keywords: loop acap intro outro fx stem vox
+    08_SETS         duration > 1800s OR filename: mix set podcast episode
 
-## BPM detection implementation (bpm.ts)
+## Classifier pipeline (classifier.ts)
 
-Package: web-audio-beat-detector
-Import: const { analyze } = require('web-audio-beat-detector')
+    1. filename keywords → TOOLS or SETS (no I/O)
+    2. metadata.ts: duration → SETS | genre → category | store BPM tag
+    3. bpm.ts: if no BPM tag → detect → category by range | null on failure
+    4. discogs.ts: if no genre AND (no BPM OR needs context) → API lookup
+    5. → INBOX
 
-Audio decoding pipeline:
-    1. Read file buffer with fs.readFile
-    2. Decode to AudioBuffer-like object via audio-decode:
-           const audioBuffer = await decode(buffer)
-           // returns { sampleRate, channelData: Float32Array[] }
-    3. Pass to analyzer:
-           const bpm = await analyze(audioBuffer)
-           // returns number (e.g. 128.0)
+## BPM detection (bpm.ts)
 
-Wrap in try/catch — detection can fail on silence, corrupt audio, or non-musical content.
-On failure: return null (do not throw).
+    const { analyze } = require('web-audio-beat-detector')
+    const decode = require('audio-decode')
+    const buf = await fs.readFile(filepath)
+    const bpm = await analyze(await decode(buf))  // → number | throws
 
-Performance note: decoding large FLAC/WAV files can be slow.
-Use cache aggressively — never re-analyze a file with the same mtime.
+Catch all errors → return null. WASM must be in pkg assets (see package.json).
+If audio-decode has ESM issues → fallback: node-web-audio-api.
+Run /research before finalizing decode strategy.
 
-audio-decode compatibility: verify CJS import works with pkg before finalizing.
-If audio-decode has ESM issues, use alternative: @ffmpeg-installer/ffmpeg is too heavy.
-Preferred fallback decoder if needed: node-web-audio-api (has AudioContext.decodeAudioData).
+## Discogs (discogs.ts)
 
-## Discogs API integration (discogs.ts)
-
-Authentication: User-Token header
+    GET https://api.discogs.com/database/search?artist=&track=&type=release&per_page=1
     Authorization: Discogs token=<DISCOGS_TOKEN>
-
-User-Agent (required by Discogs policy):
     User-Agent: dj-sort/1.0 +https://github.com/<user>/dj-sort
 
-Rate limit: 60 req/min — throttle to 1 request/sec with a simple queue
-Handle 429: wait 2s, retry once, then skip and log warning
+Throttle: 1 req/sec. On 429: wait 2s, retry once, skip.
+Token never appears in logs, cache, or organize.log. /security-auditor required.
 
-Endpoint:
-    GET https://api.discogs.com/database/search
-    params: artist, track, type=release, per_page=1
+Token resolution: --token flag → DISCOGS_TOKEN env → .env (manual parse, no dotenv)
+No token → skip Discogs entirely, log info.
 
-Response: results[0].style (string[]), results[0].genre (string[])
+## Discogs style map (define in categories.ts)
 
-## Discogs style → category map (lives in categories.ts)
-
-    Techno, Industrial, Hard Techno, EBM         → TECHNO
-    House, Deep House, Tech House, Progressive   → HOUSE
-    Disco, Nu-Disco, Funk, Soul                  → GROOVES
-    Drum n Bass, Jungle, Breakbeat, Breaks       → BREAKS_DnB
-    Ambient, Downtempo, Chillout, Trip Hop       → WARMUP
-    IDM, Experimental, Noise, Abstract, Avant    → EXPERIMENTAL
-    (no match)                                   → INBOX
+    Techno / Industrial / Hard Techno / EBM      → TECHNO
+    House / Deep House / Tech House / Progressive → HOUSE
+    Disco / Nu-Disco / Funk / Soul               → GROOVES
+    Drum n Bass / Jungle / Breakbeat / Breaks    → BREAKS_DnB
+    Ambient / Downtempo / Chillout / Trip Hop    → WARMUP
+    IDM / Experimental / Noise / Abstract        → EXPERIMENTAL
 
 ## Cache (cache.ts)
 
 File: <source_folder>/.dj-sort-cache.json
-Load on start, save on exit (including SIGINT).
+Load on start, save on exit + SIGINT.
 
-Two cache namespaces:
+    bpm:     "<filepath>|<mtime_ms>" → { bpm: number|null }     no TTL
+    discogs: "<artist>|<title>"      → { category: string }     TTL 30d
 
-    bpm:
-        key:   "<absolute_filepath>|<mtime_ms>"
-        value: { bpm: number | null, timestamp: number }
-        TTL:   none (mtime change invalidates automatically)
+## CLI
 
-    discogs:
-        key:   "<artist>|<title>" (lowercased, trimmed)
-        value: { category: string, timestamp: number }
-        TTL:   30 days
+    dj-sort <path> [--copy] [--recursive] [--dry-run]
+                   [--no-bpm] [--no-discogs] [--token <t>]
+                   [--log] [--help] [--version]
 
-## DISCOGS_TOKEN configuration
+Formats: .mp3 .flac .wav .aiff .ogg .m4a .aac
+Idempotent: files already in a target subfolder are skipped.
+Concurrency: max 3 parallel (BPM is CPU-heavy).
+Progress: "Processing 45/127..." during BPM analysis.
 
-Priority order:
-    1. --token <value> CLI flag
-    2. DISCOGS_TOKEN environment variable
-    3. .env file in current working directory (parsed manually, no dotenv package)
-
-If token absent: skip Discogs step entirely, log info message, degrade gracefully.
-
-## CLI flags
-
-    dj-sort <path> [options]
-
-    --copy           Copy files instead of moving (default: move)
-    --recursive      Scan subfolders recursively (default: flat)
-    --dry-run        Preview only, no files touched
-    --no-discogs     Skip Discogs lookup entirely
-    --no-bpm         Skip BPM detection (use metadata tags only)
-    --token <value>  Discogs API token (overrides env)
-    --log            Write organize.log to source folder (default: true)
-    --help           Usage info
-    --version        Print version
-
-## Supported audio formats
-
-.mp3 .flac .wav .aiff .ogg .m4a .aac
-
-## Idempotency rule
-
-If a file is already inside one of the known target subfolders, skip it.
-Never move a file that is already categorized.
-
-## Summary output format (printed at end of every run)
+## Summary output
 
     ┌─────────────────┬───────┬──────────────┐
     │ Category        │ Files │ Source       │
     ├─────────────────┼───────┼──────────────┤
     │ 03_HOUSE        │    42 │ tag/bpm/disc │
-    │ 04_TECHNO       │    31 │ tag/bpm      │
     │ 00_INBOX        │     3 │ —            │
-    │ ...             │       │              │
     └─────────────────┴───────┴──────────────┘
-    Total: 127 files. BPM analyzed: 84. Discogs lookups: 12. Cached: 71.
+    Total: 127. BPM analyzed: 84. Discogs: 12. Cached: 71.
 
-Source column shows which enrichment sources were used for that category.
+## Build
 
-## Build and release
+    package.json scripts:
+      "build":  "tsc"
+      "bundle": "pkg dist/index.js --targets node20-win-x64,node20-macos-arm64,node20-linux-x64 --out-path builds"
+      "dev":    "ts-node src/index.ts"
 
-### Local build
+    pkg config:
+      "pkg": { "assets": ["node_modules/web-audio-beat-detector/**/*"] }
 
-    npm run build          ← tsc → dist/
-    npm run bundle         ← pkg → builds/ (all three platforms)
-
-### package.json scripts
-
-    "build":  "tsc",
-    "bundle": "pkg dist/index.js --targets node20-win-x64,node20-macos-arm64,node20-linux-x64 --out-path builds",
-    "dev":    "ts-node src/index.ts"
-
-pkg config in package.json:
-
-    "pkg": {
-      "assets": ["node_modules/web-audio-beat-detector/**/*"],
-      "scripts": ["dist/**/*.js"]
-    }
-
-WASM files from web-audio-beat-detector must be listed in assets — pkg does not
-auto-bundle WASM. Check the package for .wasm file paths and add explicitly if needed.
-
-### GitHub Actions release workflow
-
-Trigger: push of tag matching v* (e.g. git tag v1.0.0 && git push --tags)
-
-Steps:
-    1. actions/checkout@v4
-    2. actions/setup-node@v4 (node 20)
-    3. npm ci
-    4. npm run build
-    5. npm run bundle
-    6. ncipollo/release-action → upload:
-           builds/dj-sort-win.exe
-           builds/dj-sort-macos
-           builds/dj-sort-linux
-
-## README must include
-
-- One-line description
-- Download section with links to latest release binaries
-- Setup: how to get a free Discogs token (optional)
-- Usage examples: basic, --dry-run, --recursive, --no-bpm, --no-discogs
-- Category table: folder → BPM range → genre keywords → Discogs styles
-- How BPM detection works (one paragraph, non-technical)
-- macOS Gatekeeper note: xattr -d com.apple.quarantine dj-sort-macos
-- Performance note: BPM analysis takes ~1–3s per file for large libraries
+    Release trigger: git tag v* → GitHub Actions:
+      npm ci → build → bundle → ncipollo/release-action uploads:
+        dj-sort-win.exe / dj-sort-macos / dj-sort-linux
 
 ## Do
 
-- Keep all category definitions, BPM ranges, and style maps in categories.ts only
-- Exit with code 0 on success, code 1 on fatal error
-- Use concurrency limit: max 3 files processed in parallel (BPM is CPU-heavy)
-- Save cache on exit including SIGINT handler
-- Parse .env manually — no dotenv dependency (pkg bundling issues)
-- Use got in CJS mode (require, not import)
-- List WASM assets explicitly in pkg config
-- Show a progress indicator (simple counter "Processing 45/127...") during BPM analysis
+- All constants, ranges, maps → categories.ts only
+- Exit 0 success / 1 fatal
+- /checkpoint:create before touching classifier.ts or cache.ts
+- Dry-run: show per-file source tag [tag] [bpm:124] [discogs:House]
 
 ## Don't
 
-- Don't use ESM-only packages — verify CJS compat before adding any dependency
-- Don't delete files ever — only move or copy
-- Don't re-analyze a file whose cache entry has matching mtime
-- Don't hardcode folder names or style mappings outside categories.ts
-- Don't require Node.js or Python on the end user's machine
-- Don't add node_modules to release artifacts
-- Don't throw on BPM detection failure — return null, fall through
-- Don't throw on Discogs errors — catch, log warning, fall through to INBOX
-- Don't store the token in cache file or any log
+- Don't use ESM-only packages → /research first
+- Don't delete files
+- Don't re-analyze files with cached mtime
+- Don't hardcode anything outside categories.ts
+- Don't let errors in bpm/discogs propagate — catch → fall through
+- Don't expose token anywhere
 
-## Verification checklist (run before tagging a release)
+## Checklist (before tagging release)
 
-1.  npm run build — no TypeScript errors
-2.  npm run bundle — three binaries in builds/, check file sizes are reasonable
-3.  --dry-run on test folder — correct category assignments printed, no files moved
-4.  Normal run — files in correct subfolders
-5.  Second run — 0 files moved (idempotent)
-6.  File with no ID3 tags → BPM detected → correct BPM-based category
-7.  File with no ID3 tags + silence/noise → BPM null → Discogs attempted → INBOX
-8.  File named "loop_kick_120.wav" → 07_TOOLS (Step 1 catches it, no BPM analysis)
-9.  File with duration 3600s → 08_SETS (no BPM analysis needed)
-10. --no-bpm flag → BPM detection skipped, Discogs fires for untagged files
-11. --no-discogs flag → no API calls made
-12. Valid token + cache miss → Discogs called, result in .dj-sort-cache.json
-13. Second run → cache hit for BPM and Discogs, no re-analysis, no API calls
-14. Invalid/missing token → graceful degrade, no crash
-15. WASM bundled correctly — binary runs on clean machine without node_modules
+    /validate-and-fix → then:
+
+    [ ] build — zero TS errors
+    [ ] bundle — 3 binaries in builds/
+    [ ] --dry-run — correct assignments, no moves
+    [ ] normal run — correct subfolders
+    [ ] second run — 0 files moved
+    [ ] no ID3 → BPM detected → correct category
+    [ ] no ID3 + silence → INBOX
+    [ ] "loop_kick.wav" → 07_TOOLS (no BPM analysis)
+    [ ] duration 3600s → 08_SETS
+    [ ] --no-bpm → Discogs fires for untagged
+    [ ] --no-discogs → zero API calls
+    [ ] second run → cache hit, no re-analysis
+    [ ] missing token → graceful degrade
+    [ ] binary runs without node_modules
+    [ ] token absent from all logs ← security-auditor sign-off
