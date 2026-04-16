@@ -113,14 +113,3 @@ npm run bundle:win     # Windows exe → builds/dj-sort-win.exe
 ```
 
 Requires Node.js 20+. Standalone binaries are built with [@yao-pkg/pkg](https://github.com/yao-pkg/pkg).
-
-## Release
-
-Tag triggers GitHub Actions — builds win/linux/macos binaries and creates a GitHub Release automatically:
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-No manual steps needed on GitHub.
