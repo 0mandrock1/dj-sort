@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - name: Patch node-web-audio-api exports
+        run: |
+          $pkg = Get-Content node_modules/node-web-audio-api/package.json | ConvertFrom-Json
+          if (-not $pkg.main) {
+            $json = Get-Content node_modules/node-web-audio-api/package.json -Raw
+            $json = $json -replace '"exports"', '"main": "./index.cjs",' + "`n  " + '"exports"'
+            Set-Content node_modules/node-web-audio-api/package.json $json
+          }
+        shell: pwsh
+      - run: npm run build
+      - run: ./node_modules/.bin/pkg dist/index.js --targets node20-win-x64 --output builds/dj-sort-win.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win
+          path: builds/dj-sort-win.exe
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - name: Patch node-web-audio-api exports
+        run: |
+          node -e "
+            const fs = require('fs');
+            const p = 'node_modules/node-web-audio-api/package.json';
+            const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+            if (!j.main) { j.main = './index.cjs'; fs.writeFileSync(p, JSON.stringify(j, null, 2)); }
+          "
+      - run: npm run build
+      - run: ./node_modules/.bin/pkg dist/index.js --targets node20-linux-x64 --output builds/dj-sort-linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: builds/dj-sort-linux
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - name: Patch node-web-audio-api exports
+        run: |
+          node -e "
+            const fs = require('fs');
+            const p = 'node_modules/node-web-audio-api/package.json';
+            const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+            if (!j.main) { j.main = './index.cjs'; fs.writeFileSync(p, JSON.stringify(j, null, 2)); }
+          "
+      - run: npm run build
+      - run: ./node_modules/.bin/pkg dist/index.js --targets node20-macos-arm64 --output builds/dj-sort-macos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: builds/dj-sort-macos
+
+  release:
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: win
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos
+      - name: Create Release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "dj-sort-win.exe,dj-sort-linux,dj-sort-macos"
+          generateReleaseNotes: true
+          token: ${{ secrets.GITHUB_TOKEN }}
