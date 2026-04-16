@@ -94,6 +94,16 @@ chmod +x dj-sort-macos
 ./dj-sort-macos /path/to/tracks --dry-run
 ```
 
+> **Note:** This is a CLI tool — double-clicking the binary will flash a window and close immediately.
+> To use it, open a terminal and pass the folder path as an argument (see Usage above).
+> Alternatively, create a `.bat` file next to the exe for quick launches:
+> ```bat
+> @echo off
+> dj-sort-win.exe "%~dp0tracks"
+> pause
+> ```
+> Drop your audio files into a `tracks` folder next to the `.bat`, then double-click it.
+
 ## Build from source
 
 ```bash
